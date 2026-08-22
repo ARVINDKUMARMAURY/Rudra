@@ -68,15 +68,9 @@ async def restore_main_reply_menu(message) -> None:
     except Exception:
         return
 
-def main_reply_menu(is_admin_user: bool = True) -> ReplyKeyboardMarkup:
-    rows = [
-        [KeyboardButton("🛒 Buy"), KeyboardButton("💳 Deposit")],
-        [KeyboardButton("💰 Balance"), KeyboardButton("📜 History")],
-        [KeyboardButton("🆘 Support")],
-    ]
-    if is_admin_user:
-        rows.append([KeyboardButton("🛠 Admin")])
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
+def main_reply_menu(is_admin_user: bool = True):
+    # Bottom persistent keyboard removed — was duplicating the inline main menu.
+    return ReplyKeyboardRemove()
 
 def admin_menu_keyboard() -> InlineKeyboardMarkup:
     return kb(

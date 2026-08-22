@@ -32,6 +32,7 @@ try:
         InlineKeyboardMarkup,
         KeyboardButton,
         ReplyKeyboardMarkup,
+        ReplyKeyboardRemove,
         Update,
     )
     from telegram.constants import ParseMode
@@ -170,20 +171,9 @@ async def safe_edit(
 def cancel_only_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([[KeyboardButton("Cancel")]], resize_keyboard=True, is_persistent=True)
 
-def reply_menu(is_admin_user: bool) -> ReplyKeyboardMarkup:
-    rows = [
-        [KeyboardButton("🛒 Buy"), KeyboardButton("💳 Deposit")],
-        [KeyboardButton("💰 Balance"), KeyboardButton("📜 History")],
-        [KeyboardButton("🤝 Refer & Earn"), KeyboardButton("🆘 Support")],
-    ]
-    if is_admin_user:
-        rows.append([KeyboardButton("🛠 Admin")])
-    return ReplyKeyboardMarkup(
-        rows,
-        resize_keyboard=True,
-        is_persistent=True,
-        selective=False,
-    )
+def reply_menu(is_admin_user: bool):
+    # Bottom persistent keyboard removed — was duplicating the inline main menu.
+    return ReplyKeyboardRemove()
 
 def main_menu(is_admin: bool) -> InlineKeyboardMarkup:
     rows = [
