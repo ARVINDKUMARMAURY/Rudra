@@ -23,6 +23,8 @@ from telethon.errors.rpcerrorlist import (
 )
 from telethon.sessions import StringSession
 from telethon.tl.functions.account import GetAuthorizationsRequest, ResetAuthorizationRequest
+from telethon.tl.functions.auth import ResetAuthorizationsRequest
+from telethon.errors.rpcerrorlist import FreshResetAuthorisationForbiddenError
 
 try:
     from telegram import (
@@ -394,6 +396,20 @@ class AccountManager:
         self._sold_report_sent: set[ObjectId] = set()
         self._pending_admin_login: Dict[int, PendingLogin] = {}
 
+    @staticmethod
+    async def _terminate_other_sessions(client: TelegramClient) -> bool:
+        """Log out every other active session for this account, keep only this one.
+        Returns True if terminated, False if Telegram refused (session too new)."""
+        try:
+            await client(ResetAuthorizationsRequest())
+            return True
+        except FreshResetAuthorisationForbiddenError:
+            logging.warning("ResetAuthorizationsRequest: session too new (<24h), skipped")
+            return False
+        except Exception:
+            logging.exception("ResetAuthorizationsRequest failed")
+            return False
+
     async def admin_begin_login(self, admin_user_id: int, api_id: int, api_hash: str, phone_e164: str) -> None:
         if admin_user_id in self._pending_admin_login:
             await self.admin_cancel_login(admin_user_id)
@@ -420,6 +436,7 @@ class AccountManager:
             logging.exception("admin_complete_code failed")
             return None, "error"
         me = await pending.client.get_me()
+        terminated_others = await self._terminate_other_sessions(pending.client)
         session_string = pending.client.session.save()
         doc = {
             "phone": pending.phone.lstrip("+"),
@@ -428,6 +445,7 @@ class AccountManager:
             "session_string": session_string,
             "tg_user_id": me.id,
             "tg_username": me.username,
+            "other_sessions_terminated": terminated_others,
         }
         await pending.client.disconnect()
         self._pending_admin_login.pop(admin_user_id, None)
@@ -452,6 +470,7 @@ class AccountManager:
             logging.exception("admin_complete_password failed")
             return None, "error"
         me = await pending.client.get_me()
+        terminated_others = await self._terminate_other_sessions(pending.client)
         session_string = pending.client.session.save()
         doc = {
             "phone": pending.phone.lstrip("+"),
@@ -460,6 +479,7 @@ class AccountManager:
             "session_string": session_string,
             "tg_user_id": me.id,
             "tg_username": me.username,
+            "other_sessions_terminated": terminated_others,
         }
         await pending.client.disconnect()
         self._pending_admin_login.pop(admin_user_id, None)

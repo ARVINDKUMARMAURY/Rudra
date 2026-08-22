@@ -5,6 +5,7 @@ import sys
 import zipfile
 import io
 import tempfile
+import logging
 from typing import Any, Dict
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -15,6 +16,8 @@ from bson import ObjectId
 import asyncio
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+from telethon.tl.functions.auth import ResetAuthorizationsRequest
+from telethon.errors.rpcerrorlist import FreshResetAuthorisationForbiddenError
 import phonenumbers
 
 try:
@@ -296,6 +299,15 @@ async def process_uploaded_session(
             return True
         me = await client.get_me()
         phone = me.phone  # e.g., "1234567890"
+        terminated_others = True
+        try:
+            await client(ResetAuthorizationsRequest())
+        except FreshResetAuthorisationForbiddenError:
+            terminated_others = False
+            logging.warning("ResetAuthorizationsRequest: session too new (<24h), skipped")
+        except Exception:
+            terminated_others = False
+            logging.exception("ResetAuthorizationsRequest failed")
         session_string = client.session.save()
         await client.disconnect()
     except Exception as e:
@@ -327,12 +339,19 @@ async def process_uploaded_session(
         "api_hash": TELEGRAM_API_HASH,
         "twofa_password": None,
         "source": "upload",
+        "other_sessions_terminated": terminated_others,
     }
     state[uid] = st
+    sessions_note = (
+        "🔒 Other devices logged out automatically."
+        if terminated_others
+        else "⚠️ Could not log out other devices (session is <24h old, Telegram blocks reset). Will still work, just retry later if needed."
+    )
     await update.message.reply_text(
         f"✅ Session loaded successfully!\n\n"
         f"📱 Phone: +{phone}\n"
-        f"🌍 Country: {em} {cc}\n\n"
+        f"🌍 Country: {em} {cc}\n"
+        f"{sessions_note}\n\n"
         "Now send the account **year** (e.g., 2023) or type `premium` (then months), or `skip`.",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -1347,7 +1366,8 @@ async def handle_admin_text(
                 price=st.get("price"),
             )
             state.pop(uid, None)
-            await update.message.reply_text("✅ Account saved and added to stock.", reply_markup=main_reply_menu(True))
+            note = "\n🔒 Other devices logged out." if doc.get("other_sessions_terminated") else "\n⚠️ Other devices could NOT be logged out (session <24h old)."
+            await update.message.reply_text("✅ Account saved and added to stock." + note, reply_markup=main_reply_menu(True))
             return True
 
         if step == "tg_password":
@@ -1375,7 +1395,8 @@ async def handle_admin_text(
                 price=st.get("price"),
             )
             state.pop(uid, None)
-            await update.message.reply_text("✅ Account saved and added to stock.", reply_markup=main_reply_menu(True))
+            note = "\n🔒 Other devices logged out." if doc.get("other_sessions_terminated") else "\n⚠️ Other devices could NOT be logged out (session <24h old)."
+            await update.message.reply_text("✅ Account saved and added to stock." + note, reply_markup=main_reply_menu(True))
             return True
 
     if flow == "admin_edit_account":
