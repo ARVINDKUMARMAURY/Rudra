@@ -48,21 +48,3 @@ PAYTM_API_KEY = os.getenv("PAYTM_API_KEY", "beaf7f50cb4c316b")
 PAYTM_MID = os.getenv("PAYTM_MID", "FBbU131")
 PAYTM_UPI_ID = os.getenv("PAYTM_UPI_ID", "paytm.s1i5v3t@pty")
 
-# Legacy UPI config (kept for backward compatibility – not used in new flow)
-class PaymentMethodCfg(TypedDict, total=False):
-    label: str
-    upi_id: str
-    payee_name: str
-    notes: str
-    image_url: str
-
-INR_QRS: Dict[str, PaymentMethodCfg] = {
-    "qr": {
-        "label": "Paytm",
-        "payee_name": "Paytm",
-        "upi_id": PAYTM_UPI_ID,
-        "notes": "Pay via Paytm UPI",
-        "image_url": "",
-    }
-}
-INR_PAYMENT: PaymentMethodCfg = INR_QRS["qr"]
