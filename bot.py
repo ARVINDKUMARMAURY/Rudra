@@ -1085,30 +1085,34 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # ============ PAYTM AUTO-VERIFY ============
     if data.startswith("paytm:check:"):
-        await safe_query_answer(query, "⏳ Checking payment...")
+        await safe_query_answer(query)
         order_id = data.split(":", 2)[2]
+        retry_kb = kb([
+            [InlineKeyboardButton("🔄 Check Again", callback_data=f"paytm:check:{order_id}")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="dep:cancel")],
+        ])
 
         try:
             url = f"{PAYTM_API_URL}/paytm/pay.php?key={PAYTM_API_KEY}&mid={PAYTM_MID}&midkey={PAYTM_MID}&oid={order_id}"
             resp = requests.get(url, timeout=10)
             result = resp.json()
         except Exception:
-            await safe_query_answer(query, "❌ Gateway error. Try again.", show_alert=True)
+            await safe_edit(query.message, "❌ Gateway error. Please try again.", reply_markup=retry_kb, parse_mode=None)
             return
 
         status_val = result.get("status")
         if status_val not in (True, "success", "Success", "SUCCESS", 1):
-            await safe_query_answer(query, "❌ Not paid yet. Please complete payment and try again.", show_alert=True)
+            await safe_edit(query.message, "❌ Not paid yet.\n\nPlease complete the payment, then tap Check Again.", reply_markup=retry_kb, parse_mode=None)
             return
 
         amount = int(result.get("amount", 0))
         if amount <= 0:
-            await safe_query_answer(query, "❌ Invalid amount returned.", show_alert=True)
+            await safe_edit(query.message, "❌ Invalid amount returned. Please contact support.", reply_markup=retry_kb, parse_mode=None)
             return
 
         dep = await repo.db.deposits.find_one({"order_id": order_id, "status": "pending"})
         if not dep:
-            await safe_query_answer(query, "❌ Deposit not found or already processed.", show_alert=True)
+            await safe_edit(query.message, "❌ Deposit not found or already processed.", reply_markup=kb([[InlineKeyboardButton("🏠 Menu", callback_data="menu:home")]]), parse_mode=None)
             return
 
         deposit_id = str(dep["_id"])
@@ -1116,7 +1120,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         dep2 = await repo.mark_deposit(deposit_id, "approved", admin_id=uid, credits_added=amount)
         if not dep2:
-            await safe_query_answer(query, "❌ Deposit already processed.", show_alert=True)
+            await safe_edit(query.message, "❌ Deposit already processed.", reply_markup=kb([[InlineKeyboardButton("🏠 Menu", callback_data="menu:home")]]), parse_mode=None)
             return
 
         await repo.add_credits(user_id, amount, by_admin=uid)
@@ -1154,7 +1158,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             reply_markup=kb([[InlineKeyboardButton("🏠 Menu", callback_data="menu:home")]]),
             parse_mode=None,
         )
-        await safe_query_answer(query, "✅ Payment verified!", show_alert=True)
         return
 
     # ---------- Join Verify ----------
