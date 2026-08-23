@@ -916,6 +916,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             url = f"{PAYTM_API_URL}/paytm/qr.php"
             resp = requests.get(url, params={"key": PAYTM_API_KEY, "upi": PAYTM_UPI_ID, "amount": str(amount)}, timeout=10)
             data_json = resp.json()
+            logging.info(f"[PAYTM QR] uid={uid} amount={amount} response={data_json}")
         except Exception:
             await update.message.reply_text(
                 "❌ Payment gateway error. Please try again later.",
@@ -952,7 +953,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             [InlineKeyboardButton("✅ Paid — Check Payment", callback_data=f"paytm:check:{order_id}")],
             [InlineKeyboardButton("❌ Cancel", callback_data="dep:cancel")]
         ])
-        caption = f"💳 Pay ₹{amount} using Paytm\n\nScan the QR code and pay.\nThen tap the button below to verify."
+        caption = f"💳 Pay ₹{amount} using Paytm\n\nScan the QR code and pay.\nThen tap the button below to verify.\n\nOrder ID: {order_id}"
         try:
             await update.message.reply_photo(photo=qr_url, caption=caption, reply_markup=markup)
         except Exception:
@@ -1096,6 +1097,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             url = f"{PAYTM_API_URL}/paytm/pay.php"
             resp = requests.get(url, params={"key": PAYTM_API_KEY, "mid": PAYTM_MID, "midkey": PAYTM_MID, "oid": order_id}, timeout=10)
             result = resp.json()
+            logging.info(f"[PAYTM VERIFY] uid={uid} order_id={order_id} response={result}")
         except Exception:
             await safe_edit(query.message, "❌ Gateway error. Please try again.", reply_markup=retry_kb, parse_mode=None)
             return
