@@ -250,22 +250,6 @@ def _find_results_kb(groups: list[dict[str, Any]], *, max_price: int, page: int,
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="menu:home")])
     return kb(rows)
 
-def inr_amount_kb(amount_str: str) -> InlineKeyboardMarkup:
-    display = amount_str if amount_str else "0"
-    return kb(
-        [
-            [InlineKeyboardButton("1", callback_data="inrpad:1"), InlineKeyboardButton("2", callback_data="inrpad:2"), InlineKeyboardButton("3", callback_data="inrpad:3")],
-            [InlineKeyboardButton("4", callback_data="inrpad:4"), InlineKeyboardButton("5", callback_data="inrpad:5"), InlineKeyboardButton("6", callback_data="inrpad:6")],
-            [InlineKeyboardButton("7", callback_data="inrpad:7"), InlineKeyboardButton("8", callback_data="inrpad:8"), InlineKeyboardButton("9", callback_data="inrpad:9")],
-            [InlineKeyboardButton("0", callback_data="inrpad:0"), InlineKeyboardButton("⌫", callback_data="inrpad:del")],
-            [
-                InlineKeyboardButton("⬅️ Back", callback_data="dep:start"),
-                InlineKeyboardButton("❌ Cancel", callback_data="dep:cancel"),
-                InlineKeyboardButton("✅ Confirm", callback_data="inrpad:ok"),
-            ],
-        ]
-    )
-
 def years_keyboard(country: str, years: list[dict]) -> InlineKeyboardMarkup:
     def _sort_key(item: dict):
         y = item.get("year")
@@ -915,6 +899,67 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text_in = (update.message.text or "").strip()
     repo: Repo = context.application.bot_data["repo"]
 
+    if uid in STATE and STATE[uid].get("flow") == "deposit" and STATE[uid].get("step") == "inr_amount_text":
+        if text_in.lower() == "cancel":
+            STATE.pop(uid, None)
+            await update.message.reply_text("Cancelled.", reply_markup=reply_menu(is_admin(uid)))
+            return
+        if not text_in.isdigit() or int(text_in) <= 0:
+            await update.message.reply_text("Please send a valid amount as a number (e.g. 100), or press Cancel.")
+            return
+        amount = int(text_in)
+        st = STATE[uid]
+        st["amount"] = amount
+        st["step"] = "paytm_qr"
+
+        try:
+            url = f"{PAYTM_API_URL}/paytm/qr.php?key={PAYTM_API_KEY}&upi={PAYTM_UPI_ID}&amount={amount}"
+            resp = requests.get(url, timeout=10)
+            data_json = resp.json()
+        except Exception:
+            await update.message.reply_text(
+                "❌ Payment gateway error. Please try again later.",
+                reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data="dep:start")]]),
+            )
+            return
+
+        if not data_json.get("status"):
+            await update.message.reply_text(
+                f"❌ QR generation failed: {data_json.get('msg', data_json.get('message', 'unknown error'))}",
+                reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data="dep:start")]]),
+            )
+            return
+
+        order_id = data_json.get("order_id")
+        qr_url = data_json.get("qr_url")
+        st["order_id"] = order_id
+
+        deposit_id = await repo.create_deposit_request(
+            user_id=uid,
+            username=(update.effective_user.username or ""),
+            amount=amount,
+            method="paytm",
+            network=None,
+            amount_text=str(amount),
+        )
+        await repo.db.deposits.update_one(
+            {"_id": ObjectId(deposit_id)},
+            {"$set": {"order_id": order_id}}
+        )
+        st["deposit_id"] = deposit_id
+
+        markup = kb([
+            [InlineKeyboardButton("✅ Paid — Check Payment", callback_data=f"paytm:check:{order_id}")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="dep:cancel")]
+        ])
+        caption = f"💳 Pay ₹{amount} using Paytm\n\nScan the QR code and pay.\nThen tap the button below to verify."
+        try:
+            await update.message.reply_photo(photo=qr_url, caption=caption, reply_markup=markup)
+        except Exception:
+            await update.message.reply_text(caption, reply_markup=markup)
+            await update.message.reply_text("❌ Could not display QR image. Please contact support if needed.")
+        return
+
     if uid in STATE and STATE[uid].get("flow") == "find_credits" and STATE[uid].get("step") == "input":
         if text_in.lower() == "cancel":
             STATE.pop(uid, None)
@@ -1251,96 +1296,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if data == "dep:inr":
         await safe_query_answer(query, cache_time=0)
-        STATE[uid] = {"flow": "deposit", "step": "inr_amount_pad", "method": "paytm", "amount_str": ""}
+        STATE[uid] = {"flow": "deposit", "step": "inr_amount_text", "method": "paytm"}
         await safe_edit(
             query.message,
-            "💳 Paytm Deposit\n\nEnter amount (₹):",
-            reply_markup=inr_amount_kb(""),
+            "💳 Paytm Deposit\n\nType the amount (₹) you want to deposit and send it as a message.\n\nExample: 100",
+            reply_markup=kb([[InlineKeyboardButton("❌ Cancel", callback_data="dep:cancel")]]),
             parse_mode=None,
         )
-        return
-
-    # ---------- INR Keypad ----------
-    if data.startswith("inrpad:"):
-        await safe_query_answer(query, cache_time=0)
-        if uid not in STATE or STATE[uid].get("flow") != "deposit" or STATE[uid].get("step") != "inr_amount_pad":
-            return
-        st = STATE[uid]
-        amt = str(st.get("amount_str") or "")
-        action = data.split(":", 1)[1]
-
-        if action.isdigit():
-            amt = (amt + action).lstrip("0")
-        elif action == "del":
-            amt = amt[:-1]
-        elif action == "ok":
-            if not amt.isdigit() or int(amt) <= 0:
-                await safe_query_answer(query, "Enter valid amount", show_alert=True)
-                return
-            amount = int(amt)
-            st["amount"] = amount
-            st["step"] = "paytm_qr"
-
-            try:
-                url = f"{PAYTM_API_URL}/paytm/qr.php?key={PAYTM_API_KEY}&upi={PAYTM_UPI_ID}&amount={amount}"
-                resp = requests.get(url, timeout=10)
-                data_json = resp.json()
-            except Exception:
-                await safe_edit(
-                    query.message,
-                    "❌ Payment gateway error. Please try again later.",
-                    reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data="dep:start")]]),
-                    parse_mode=None,
-                )
-                return
-
-            if not data_json.get("status"):
-                await safe_edit(
-                    query.message,
-                    f"❌ QR generation failed: {data_json.get('msg', data_json.get('message', 'unknown error'))}",
-                    reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data="dep:start")]]),
-                    parse_mode=None,
-                )
-                return
-
-            order_id = data_json.get("order_id")
-            qr_url = data_json.get("qr_url")
-            st["order_id"] = order_id
-
-            deposit_id = await repo.create_deposit_request(
-                user_id=uid,
-                username=(update.effective_user.username or ""),
-                amount=amount,
-                method="paytm",
-                network=None,
-                amount_text=str(amount),
-            )
-            await repo.db.deposits.update_one(
-                {"_id": ObjectId(deposit_id)},
-                {"$set": {"order_id": order_id}}
-            )
-            st["deposit_id"] = deposit_id
-
-            markup = kb([
-                [InlineKeyboardButton("✅ Paid — Check Payment", callback_data=f"paytm:check:{order_id}")],
-                [InlineKeyboardButton("❌ Cancel", callback_data="dep:cancel")]
-            ])
-            caption = f"💳 Pay ₹{amount} using Paytm\n\nScan the QR code and pay.\nThen tap the button below to verify."
-            await safe_edit(
-                query.message,
-                caption,
-                reply_markup=markup,
-                parse_mode=None,
-            )
-            try:
-                await context.bot.send_photo(chat_id=uid, photo=qr_url, caption="📸 QR Code")
-            except Exception:
-                await context.bot.send_message(chat_id=uid, text="❌ Could not display QR. Please contact support.")
-            return
-
-        st["amount_str"] = amt
-        label = f"Enter amount:\n{(amt if amt else '0')}"
-        await safe_edit(query.message, label, reply_markup=inr_amount_kb(amt), parse_mode=None)
         return
 
     # ---------- Shop ----------
