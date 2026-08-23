@@ -771,13 +771,13 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=main_menu(is_admin_user),
         )
-        await update.message.reply_text("✅ Menu enabled.", reply_markup=reply_menu(is_admin_user))
     except Exception:
         await update.message.reply_text(
             text,
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=main_menu(is_admin_user),
         )
+    await update.message.reply_text("✅ Menu enabled.", reply_markup=reply_menu(is_admin_user))
 
 async def show_balance(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
     uid = update.effective_user.id
