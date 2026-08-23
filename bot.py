@@ -913,8 +913,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         st["step"] = "paytm_qr"
 
         try:
-            url = f"{PAYTM_API_URL}/paytm/qr.php?key={PAYTM_API_KEY}&upi={PAYTM_UPI_ID}&amount={amount}"
-            resp = requests.get(url, timeout=10)
+            url = f"{PAYTM_API_URL}/paytm/qr.php"
+            resp = requests.get(url, params={"key": PAYTM_API_KEY, "upi": PAYTM_UPI_ID, "amount": str(amount)}, timeout=10)
             data_json = resp.json()
         except Exception:
             await update.message.reply_text(
@@ -1093,8 +1093,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         ])
 
         try:
-            url = f"{PAYTM_API_URL}/paytm/pay.php?key={PAYTM_API_KEY}&mid={PAYTM_MID}&midkey={PAYTM_MID}&oid={order_id}"
-            resp = requests.get(url, timeout=10)
+            url = f"{PAYTM_API_URL}/paytm/pay.php"
+            resp = requests.get(url, params={"key": PAYTM_API_KEY, "mid": PAYTM_MID, "midkey": PAYTM_MID, "oid": order_id}, timeout=10)
             result = resp.json()
         except Exception:
             await safe_edit(query.message, "❌ Gateway error. Please try again.", reply_markup=retry_kb, parse_mode=None)
