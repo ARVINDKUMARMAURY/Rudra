@@ -1051,7 +1051,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await safe_query_answer(query, "❌ Gateway error. Try again.", show_alert=True)
             return
 
-        if result.get("status") != "success":
+        status_val = result.get("status")
+        if status_val not in (True, "success", "Success", "SUCCESS", 1):
             await safe_query_answer(query, "❌ Not paid yet. Please complete payment and try again.", show_alert=True)
             return
 
@@ -1293,10 +1294,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 )
                 return
 
-            if data_json.get("status") != "success":
+            if not data_json.get("status"):
                 await safe_edit(
                     query.message,
-                    f"❌ QR generation failed: {data_json.get('message', 'unknown error')}",
+                    f"❌ QR generation failed: {data_json.get('msg', data_json.get('message', 'unknown error'))}",
                     reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data="dep:start")]]),
                     parse_mode=None,
                 )
