@@ -933,6 +933,16 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if len(utr) < 4:
             await update.message.reply_text("Please send a valid UTR / transaction reference number, or press Cancel.")
             return
+
+        dup = await repo.db.deposits.find_one({"amount_text": utr, "method": "upi", "status": "approved"})
+        if dup:
+            await update.message.reply_text(
+                "❌ This UTR has already been used for a deposit. Please contact support if this is a mistake.",
+                reply_markup=reply_menu(is_admin(uid)),
+            )
+            STATE.pop(uid, None)
+            return
+
         st = STATE[uid]
         amount = int(st["amount"])
         username = update.effective_user.username or ""
@@ -947,20 +957,38 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         STATE.pop(uid, None)
 
+        dep2 = await repo.mark_deposit(deposit_id, "approved", admin_id=uid, credits_added=amount)
+        if not dep2:
+            await update.message.reply_text("❌ Something went wrong. Please contact support.", reply_markup=reply_menu(is_admin(uid)))
+            return
+        await repo.add_credits(uid, amount, by_admin=uid)
+
+        try:
+            udoc = await repo.db.users.find_one({"user_id": uid})
+            bal = int((udoc or {}).get("credits", 0))
+        except Exception:
+            bal = amount
+
         await update.message.reply_text(
-            f"✅ Submitted!\n\nAmount: ₹{amount}\nUTR: {utr}\n\n"
-            "Your deposit is pending admin approval. You'll be notified once it's confirmed.",
+            f"✅ Payment confirmed!\n\n"
+            f"Amount: ₹{amount}\nUTR: {utr}\nCredits added: {amount}\nNew balance: {bal} credits",
             reply_markup=reply_menu(is_admin(uid)),
         )
 
-        admin_markup = kb([
-            [
-                InlineKeyboardButton("✅ Approve", callback_data=f"admin:dep:approve:{deposit_id}"),
-                InlineKeyboardButton("❌ Reject", callback_data=f"admin:dep:reject:{deposit_id}"),
-            ],
-        ])
+        try:
+            await _notify_referral_award(
+                context=context,
+                repo=repo,
+                referred_user_id=uid,
+                deposit_amount=amount,
+                admin_id=uid,
+                deposit_id=deposit_id,
+            )
+        except Exception:
+            pass
+
         admin_text = (
-            "💳 New UPI Deposit — Pending\n\n"
+            "💳 UPI Deposit — Auto-approved (UTR-based, unverified)\n\n"
             f"User: {uid} @{username if username else 'N/A'}\n"
             f"Amount: ₹{amount}\n"
             f"UTR: {utr}\n"
@@ -968,9 +996,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         for admin_id in ADMIN_USER_IDS:
             try:
-                await context.bot.send_message(chat_id=admin_id, text=admin_text, reply_markup=admin_markup)
+                await context.bot.send_message(chat_id=admin_id, text=admin_text)
             except Exception:
-                logging.exception(f"Failed to notify admin {admin_id} of new deposit {deposit_id}")
+                logging.exception(f"Failed to notify admin {admin_id} of auto-approved deposit {deposit_id}")
         return
 
     if uid in STATE and STATE[uid].get("flow") == "find_credits" and STATE[uid].get("step") == "input":
