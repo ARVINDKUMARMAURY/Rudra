@@ -5,6 +5,8 @@ import logging
 import os
 import sys
 import html
+import io
+import zipfile
 import requests
 from urllib.parse import quote
 from dataclasses import dataclass
@@ -212,13 +214,14 @@ def main_menu(is_admin: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton("📜 History", callback_data="me:history:0"),
         ],
         [
+            InlineKeyboardButton("🗂 Buy Session", callback_data="session:start"),
             InlineKeyboardButton("💰 Balance", callback_data="me:balance"),
-            InlineKeyboardButton("💳 Deposit", callback_data="dep:start"),
         ],
         [
+            InlineKeyboardButton("💳 Deposit", callback_data="dep:start"),
             InlineKeyboardButton("🆘 Support", url=f"https://t.me/{SUPPORT_USERNAME}"),
-            InlineKeyboardButton("🔎 Find by Credits", callback_data="find:credits"),
         ],
+        [InlineKeyboardButton("🔎 Find by Credits", callback_data="find:credits")],
         [InlineKeyboardButton("🤝 Refer & Earn", callback_data="ref:menu")],
     ]
     if is_admin:
@@ -986,6 +989,62 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text_in = (update.message.text or "").strip()
     repo: Repo = context.application.bot_data["repo"]
 
+    if uid in STATE and STATE[uid].get("flow") == "buy_session" and STATE[uid].get("step") == "qty_text":
+        if text_in.lower() == "cancel":
+            STATE.pop(uid, None)
+            await update.message.reply_text("Cancelled.", reply_markup=reply_menu(is_admin(uid)))
+            return
+        if not text_in.isdigit() or int(text_in) <= 0:
+            await update.message.reply_text("Please send a valid quantity as a number (e.g. 10), or press Cancel.")
+            return
+        qty = int(text_in)
+        session_price = await repo.get_session_price()
+        if session_price <= 0:
+            STATE.pop(uid, None)
+            await update.message.reply_text("Session buying isn't set up yet. Please contact support.", reply_markup=reply_menu(is_admin(uid)))
+            return
+
+        total_cost = qty * session_price
+        user = await repo.ensure_user(uid, username=update.effective_user.username)
+        if int(user.get("credits", 0)) < total_cost:
+            STATE.pop(uid, None)
+            await update.message.reply_text(
+                f"❌ Insufficient balance.\n\nNeed: ₹{total_cost} for {qty} session(s)\nYour balance: {int(user.get('credits', 0))} credits",
+                reply_markup=reply_menu(is_admin(uid)),
+            )
+            return
+
+        STATE.pop(uid, None)
+        accounts, status = await repo.buy_session_accounts(
+            user_id=uid, username=update.effective_user.username, quantity=qty, unit_price=session_price
+        )
+        if status == "insufficient_credits":
+            await update.message.reply_text("❌ Insufficient balance.", reply_markup=reply_menu(is_admin(uid)))
+            return
+        if status == "not_available" or not accounts:
+            await update.message.reply_text(
+                f"❌ Not enough sessions in stock right now (requested {qty}). Please try a smaller quantity.",
+                reply_markup=reply_menu(is_admin(uid)),
+            )
+            return
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for acc in accounts:
+                phone = str(acc.get("phone") or acc.get("_id"))
+                session_str = acc.get("session_string") or ""
+                zf.writestr(f"{phone}.session", session_str)
+        buf.seek(0)
+        buf.name = f"sessions_{qty}.zip"
+
+        await update.message.reply_document(
+            document=buf,
+            filename=f"sessions_{qty}.zip",
+            caption=f"✅ {len(accounts)} session(s) purchased for ₹{total_cost}.",
+            reply_markup=reply_menu(is_admin(uid)),
+        )
+        return
+
     if uid in STATE and STATE[uid].get("flow") == "deposit" and STATE[uid].get("step") == "upi_amount_text":
         if text_in.lower() == "cancel":
             STATE.pop(uid, None)
@@ -1302,7 +1361,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if data in {"dep:reject", "dep:cancel"}:
         await safe_query_answer(query, cache_time=0)
-        if uid in STATE and STATE[uid].get("flow") == "deposit":
+        if uid in STATE and STATE[uid].get("flow") in {"deposit", "buy_session"}:
             STATE.pop(uid, None)
         try:
             await query.message.delete()
@@ -1335,6 +1394,29 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await safe_edit(
             query.message,
             "💳 BharatPe UPI Deposit\n\nType the amount (₹) you want to deposit and send it as a message.\n\nExample: 100",
+            reply_markup=kb([[InlineKeyboardButton("❌ Cancel", callback_data="dep:cancel")]]),
+            parse_mode=None,
+        )
+        return
+
+    # ---------- Buy Session (raw session files, no live OTP relay) ----------
+    if data == "session:start":
+        await safe_query_answer(query, cache_time=0)
+        session_price = await repo.get_session_price()
+        available = await repo.count_available_accounts()
+        if session_price <= 0:
+            await safe_edit(
+                query.message,
+                "🗂 Buy Session\n\nThis feature isn't set up yet. Please contact support.",
+                reply_markup=back_to_menu(),
+                parse_mode=None,
+            )
+            return
+        STATE[uid] = {"flow": "buy_session", "step": "qty_text"}
+        await safe_edit(
+            query.message,
+            f"🗂 Buy Session\n\nPrice: ₹{session_price} per session\nAvailable stock: {available}\n\n"
+            "Type how many sessions you want to buy (e.g. 10).",
             reply_markup=kb([[InlineKeyboardButton("❌ Cancel", callback_data="dep:cancel")]]),
             parse_mode=None,
         )

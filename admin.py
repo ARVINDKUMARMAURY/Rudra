@@ -88,6 +88,7 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton("🎁 Referrals", callback_data="admin:referrals:0"),
                 InlineKeyboardButton("🏷️ Bulk Discount", callback_data="admin:bulkdiscount"),
+                InlineKeyboardButton("🗂 Session Price", callback_data="admin:sessionprice"),
             ],
             [
                 InlineKeyboardButton("🚫 Ban System", callback_data="admin:banmenu"),
@@ -661,6 +662,35 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return True
 
+    if data == "admin:sessionprice":
+        await query.answer(cache_time=0)
+        await restore_main_reply_menu(query.message)
+        current = await repo.get_session_price()
+        available = await repo.count_available_accounts()
+        await safe_edit(
+            query.message,
+            f"🗂 Session Price\n\nCurrent price: ₹{current} per session\nAvailable stock: {available}\n\n"
+            "This is the price users pay per session in the 'Buy Session' (bulk ZIP) feature.",
+            parse_mode=None,
+            reply_markup=kb(
+                [
+                    [InlineKeyboardButton("✏️ Set Price", callback_data="admin:sessionprice:set")],
+                    [InlineKeyboardButton("⬅️ Back", callback_data="admin:menu")],
+                ]
+            ),
+        )
+        return True
+
+    if data == "admin:sessionprice:set":
+        await query.answer(cache_time=0)
+        await restore_main_reply_menu(query.message)
+        state[uid] = {"flow": "admin_sessionprice", "step": "price"}
+        await query.message.reply_text(
+            "🗂 Session Price\n\nSend the price (in credits/₹) to charge per session.\nExample: 20\n\nType Cancel to stop.",
+            reply_markup=cancel_reply_kb(),
+        )
+        return True
+
     if data == "admin:banmenu":
         await query.answer(cache_time=0)
         await restore_main_reply_menu(query.message)
@@ -1208,6 +1238,20 @@ async def handle_admin_text(
             st2 = await repo.get_bulk_discount()
             await update.message.reply_text(
                 f"✅ Bulk discount updated successfully!\n\nStatus: {'ON ✅' if st2.get('enabled') else 'OFF ❌'}\nDiscount: {int(st2.get('percent', 0) or 0)}%",
+                reply_markup=main_reply_menu(True),
+            )
+            return True
+
+    if flow == "admin_sessionprice":
+        if step == "price":
+            if not text.isdigit() or int(text) <= 0:
+                await update.message.reply_text("Send a valid positive number (example 20):")
+                return True
+            new_price = int(text)
+            await repo.set_session_price(new_price)
+            state.pop(uid, None)
+            await update.message.reply_text(
+                f"✅ Session price updated!\n\nNew price: ₹{new_price} per session",
                 reply_markup=main_reply_menu(True),
             )
             return True

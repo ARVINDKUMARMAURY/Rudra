@@ -79,6 +79,91 @@ class Repo:
         )
         return await self.get_bulk_discount()
 
+    # -------- Admin Settings (Session Price) --------
+    async def get_session_price(self) -> int:
+        doc = await self.db.admin_settings.find_one({"key": "session_price"})
+        if not doc:
+            return 0
+        return int(doc.get("price", 0) or 0)
+
+    async def set_session_price(self, price: int) -> int:
+        price_i = max(0, int(price))
+        await self.db.admin_settings.update_one(
+            {"key": "session_price"},
+            {"$set": {"key": "session_price", "price": price_i, "updated_at": utcnow()}},
+            upsert=True,
+        )
+        return price_i
+
+    async def buy_session_accounts(
+        self, *, user_id: int, username: str | None, quantity: int, unit_price: int
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Atomically buy `quantity` available accounts (any country/year) as raw sessions.
+        Deducts credits first, then assigns accounts one by one; rolls back fully on any failure."""
+        now = utcnow()
+        await self.ensure_user(user_id)
+        quantity = int(quantity)
+        total_cost = int(unit_price) * quantity
+
+        dec = await self.db.users.update_one(
+            {"user_id": int(user_id), "credits": {"$gte": total_cost}},
+            {"$inc": {"credits": -total_cost}, "$set": {"updated_at": now}},
+        )
+        if dec.modified_count != 1:
+            return [], "insufficient_credits"
+
+        assigned: list[dict[str, Any]] = []
+        for _ in range(quantity):
+            account = await self.db.accounts.find_one_and_update(
+                {"status": "available"},
+                {
+                    "$set": {
+                        "status": "assigned",
+                        "assigned_to": int(user_id),
+                        "sold_to_user_id": int(user_id),
+                        "sold_to_username": (username or ""),
+                        "sale_type": "session",
+                        "assigned_at": now,
+                        "updated_at": now,
+                    }
+                },
+                sort=[("created_at", 1)],
+                return_document=ReturnDocument.AFTER,
+            )
+            if not account:
+                break
+            assigned.append(account)
+
+        if len(assigned) < quantity:
+            # Roll back: revert any assigned accounts + refund credits
+            for acc in assigned:
+                await self.db.accounts.update_one(
+                    {"_id": acc["_id"]},
+                    {"$set": {"status": "available", "assigned_to": None, "sold_to_user_id": None, "sold_to_username": None, "sale_type": None, "assigned_at": None, "updated_at": now}},
+                )
+            await self.db.users.update_one(
+                {"user_id": int(user_id)},
+                {"$inc": {"credits": total_cost}, "$set": {"updated_at": now}},
+            )
+            return [], "not_available"
+
+        for acc in assigned:
+            await self.db.purchases.insert_one(
+                {
+                    "user_id": int(user_id),
+                    "account_id": acc["_id"],
+                    "price": int(unit_price),
+                    "original_price": int(unit_price),
+                    "discount_used": False,
+                    "phone": acc.get("phone"),
+                    "country": acc.get("country"),
+                    "year": acc.get("year"),
+                    "sale_type": "session",
+                    "created_at": now,
+                }
+            )
+        return assigned, "ok"
+
     async def apply_bulk_discount(self, *, percent: int) -> dict[str, Any]:
         p = max(0, min(95, int(percent)))
         await self.db.accounts.update_many(
