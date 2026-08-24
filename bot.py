@@ -67,7 +67,9 @@ from config import (
     REPORT_CHANNEL_USERNAME,
     START_IMAGE,
     SUPPORT_USERNAME,
-    PAYTM_UPI_ID,
+    BHARATPE_UPI_ID,
+    BHARATPE_TOKEN,
+    BHARATPE_MERCHANT_ID,
 )
 
 try:
@@ -107,6 +109,36 @@ def require_token() -> None:
 
 def kb(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
+
+async def bharatpe_find_txn_by_utr(utr: str) -> dict | None:
+    """Search BharatPe merchant transactions for a SUCCESS payment matching the given UTR
+    (matches against bankReferenceNo, case-insensitive). Returns the transaction dict or None."""
+    if not BHARATPE_TOKEN or not BHARATPE_MERCHANT_ID:
+        return None
+    utr_norm = utr.strip().upper()
+    try:
+        resp = requests.get(
+            "https://payments-tesseract.bharatpe.in/api/v1/merchant/transactions",
+            params={"module": "PAYMENT_QR", "merchantId": BHARATPE_MERCHANT_ID},
+            headers={"token": BHARATPE_TOKEN},
+            timeout=12,
+        )
+        data = resp.json()
+    except Exception:
+        logging.exception("BharatPe transactions API call failed")
+        return None
+
+    if not data.get("status"):
+        return None
+
+    txns = (data.get("data") or {}).get("transactions") or []
+    for txn in txns:
+        ref = str(txn.get("bankReferenceNo") or "").strip().upper()
+        internal = str(txn.get("internalUtr") or "").strip().upper()
+        if utr_norm and (utr_norm == ref or utr_norm == internal):
+            if str(txn.get("status")) == "SUCCESS" and txn.get("type") == "PAYMENT_RECV":
+                return txn
+    return None
 
 async def safe_query_answer(query, *args, **kwargs) -> None:
     try:
@@ -883,6 +915,63 @@ async def _notify_referral_award(
     except Exception:
         pass
 
+async def _bharatpe_verify_and_credit(
+    repo: Repo, context: ContextTypes.DEFAULT_TYPE, uid: int, username: str, utr: str
+) -> tuple[bool, str]:
+    """Looks up the UTR in BharatPe's real transaction list. If found (and not already
+    claimed), credits the user for the real amount received. Returns (success, message)."""
+    dup = await repo.db.deposits.find_one({"bank_ref": utr, "method": "bharatpe", "status": "approved"})
+    if dup:
+        return False, "❌ This payment has already been claimed."
+
+    txn = await bharatpe_find_txn_by_utr(utr)
+    if not txn:
+        return False, "⏳ Payment not found yet.\n\nIf you just paid, it can take a minute to reflect. Tap Check Again."
+
+    amount = int(txn.get("amount", 0))
+    if amount <= 0:
+        return False, "❌ Invalid transaction amount returned. Please contact support."
+
+    deposit_id = await repo.create_deposit_request(
+        user_id=uid, username=username, amount=amount, method="bharatpe", network=None, amount_text=utr,
+    )
+    await repo.db.deposits.update_one(
+        {"_id": ObjectId(deposit_id)},
+        {"$set": {"bank_ref": utr, "txn_id": txn.get("id")}},
+    )
+    dep2 = await repo.mark_deposit(deposit_id, "approved", admin_id=uid, credits_added=amount)
+    if not dep2:
+        return False, "❌ Something went wrong recording the deposit. Please contact support."
+    await repo.add_credits(uid, amount, by_admin=uid)
+
+    try:
+        await _notify_referral_award(
+            context=context, repo=repo, referred_user_id=uid, deposit_amount=amount, admin_id=uid, deposit_id=deposit_id,
+        )
+    except Exception:
+        pass
+
+    try:
+        udoc = await repo.db.users.find_one({"user_id": uid})
+        bal = int((udoc or {}).get("credits", 0))
+    except Exception:
+        bal = amount
+
+    for admin_id in ADMIN_USER_IDS:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=(
+                    "💳 BharatPe Deposit — Verified & credited\n\n"
+                    f"User: {uid} @{username if username else 'N/A'}\n"
+                    f"Amount: ₹{amount}\nUTR: {utr}\nDeposit ID: {deposit_id}"
+                ),
+            )
+        except Exception:
+            pass
+
+    return True, f"✅ Payment verified!\n\nAmount: ₹{amount}\nUTR: {utr}\nCredits added: {amount}\nNew balance: {bal} credits"
+
 # ---------- Text Handler ----------
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await _ban_guard(update, context):
@@ -906,13 +995,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text("Please send a valid amount as a number (e.g. 100), or press Cancel.")
             return
         amount = int(text_in)
-        STATE[uid] = {"flow": "deposit", "step": "upi_utr_text", "method": "upi", "amount": amount}
+        STATE[uid] = {"flow": "deposit", "step": "upi_utr_text", "method": "bharatpe", "amount": amount}
 
-        upi_link = f"upi://pay?pa={PAYTM_UPI_ID}&pn=Payment&am={amount}&cu=INR"
+        upi_link = f"upi://pay?pa={BHARATPE_UPI_ID}&pn=Payment&am={amount}&cu=INR"
         qr_img_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={quote(upi_link)}"
         caption = (
             f"💳 Pay ₹{amount}\n\n"
-            f"UPI ID: `{PAYTM_UPI_ID}`\n\n"
+            f"UPI ID: `{BHARATPE_UPI_ID}`\n\n"
             "Scan the QR or pay to the UPI ID above using any UPI app.\n\n"
             "After paying, send the *UTR / Transaction Reference Number* here as a message "
             "(you'll find it in your payment app's transaction history)."
@@ -937,72 +1026,20 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
-        dup = await repo.db.deposits.find_one({"amount_text": utr, "method": "upi", "status": {"$in": ["approved", "pending"]}})
-        if dup:
-            await update.message.reply_text(
-                "❌ This UTR has already been used for a deposit. Please contact support if this is a mistake.",
-                reply_markup=reply_menu(is_admin(uid)),
-            )
-            STATE.pop(uid, None)
-            return
-
-        st = STATE[uid]
-        amount = int(st["amount"])
         username = update.effective_user.username or ""
+        ok, msg = await _bharatpe_verify_and_credit(repo, context, uid, username, utr)
 
-        deposit_id = await repo.create_deposit_request(
-            user_id=uid,
-            username=username,
-            amount=amount,
-            method="upi",
-            network=None,
-            amount_text=utr,
-        )
-        STATE.pop(uid, None)
-
-        dep2 = await repo.mark_deposit(deposit_id, "approved", admin_id=uid, credits_added=amount)
-        if not dep2:
-            await update.message.reply_text("❌ Something went wrong. Please contact support.", reply_markup=reply_menu(is_admin(uid)))
-            return
-        await repo.add_credits(uid, amount, by_admin=uid)
-
-        try:
-            udoc = await repo.db.users.find_one({"user_id": uid})
-            bal = int((udoc or {}).get("credits", 0))
-        except Exception:
-            bal = amount
-
-        await update.message.reply_text(
-            f"✅ Payment confirmed!\n\n"
-            f"Amount: ₹{amount}\nUTR: {utr}\nCredits added: {amount}\nNew balance: {bal} credits",
-            reply_markup=reply_menu(is_admin(uid)),
-        )
-
-        try:
-            await _notify_referral_award(
-                context=context,
-                repo=repo,
-                referred_user_id=uid,
-                deposit_amount=amount,
-                admin_id=uid,
-                deposit_id=deposit_id,
-            )
-        except Exception:
-            pass
-
-        admin_text = (
-            "💳 UPI Deposit — Auto-approved (UTR-based, unverified)\n\n"
-            f"User: {uid} @{username if username else 'N/A'}\n"
-            f"Amount: ₹{amount}\n"
-            f"UTR: {utr}\n"
-            f"Deposit ID: {deposit_id}"
-        )
-        for admin_id in ADMIN_USER_IDS:
-            try:
-                await context.bot.send_message(chat_id=admin_id, text=admin_text)
-            except Exception:
-                logging.exception(f"Failed to notify admin {admin_id} of auto-approved deposit {deposit_id}")
+        if ok:
+            STATE.pop(uid, None)
+            await update.message.reply_text(msg, reply_markup=reply_menu(is_admin(uid)))
+        else:
+            retry_kb = kb([
+                [InlineKeyboardButton("🔄 Check Again", callback_data=f"bpcheck:{utr}")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="dep:cancel")],
+            ])
+            await update.message.reply_text(msg, reply_markup=retry_kb)
         return
+
 
     if uid in STATE and STATE[uid].get("flow") == "find_credits" and STATE[uid].get("step") == "input":
         if text_in.lower() == "cancel":
@@ -1042,7 +1079,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=kb(
                 [
-                    [InlineKeyboardButton("💳 Paytm (UPI)", callback_data="dep:upi")],
+                    [InlineKeyboardButton("💳 BharatPe (UPI)", callback_data="dep:upi")],
                     [InlineKeyboardButton("🏠 Menu", callback_data="menu:home")],
                 ]
             ),
@@ -1137,6 +1174,22 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             reply_markup=kb([[InlineKeyboardButton("💳 New Deposit", callback_data="dep:start")]]),
             parse_mode=None,
         )
+        return
+
+    if data.startswith("bpcheck:"):
+        await safe_query_answer(query, cache_time=0)
+        utr = data.split(":", 1)[1]
+        username = update.effective_user.username or ""
+        ok, msg = await _bharatpe_verify_and_credit(repo, context, uid, username, utr)
+        if ok:
+            STATE.pop(uid, None)
+            await safe_edit(query.message, msg, reply_markup=kb([[InlineKeyboardButton("🏠 Menu", callback_data="menu:home")]]), parse_mode=None)
+        else:
+            retry_kb = kb([
+                [InlineKeyboardButton("🔄 Check Again", callback_data=f"bpcheck:{utr}")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="dep:cancel")],
+            ])
+            await safe_edit(query.message, msg, reply_markup=retry_kb, parse_mode=None)
         return
 
     # ---------- Join Verify ----------
@@ -1239,7 +1292,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "💳 *Deposit*\n\nChoose deposit method:",
             reply_markup=kb(
                 [
-                    [InlineKeyboardButton("💳 Paytm (UPI)", callback_data="dep:upi")],
+                    [InlineKeyboardButton("💳 BharatPe (UPI)", callback_data="dep:upi")],
                     [InlineKeyboardButton("🏠 Menu", callback_data="menu:home")],
                 ]
             ),
@@ -1278,10 +1331,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if data == "dep:upi":
         await safe_query_answer(query, cache_time=0)
-        STATE[uid] = {"flow": "deposit", "step": "upi_amount_text", "method": "upi"}
+        STATE[uid] = {"flow": "deposit", "step": "upi_amount_text", "method": "bharatpe"}
         await safe_edit(
             query.message,
-            "💳 Paytm/UPI Deposit\n\nType the amount (₹) you want to deposit and send it as a message.\n\nExample: 100",
+            "💳 BharatPe UPI Deposit\n\nType the amount (₹) you want to deposit and send it as a message.\n\nExample: 100",
             reply_markup=kb([[InlineKeyboardButton("❌ Cancel", callback_data="dep:cancel")]]),
             parse_mode=None,
         )

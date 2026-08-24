@@ -41,7 +41,9 @@ TELEGRAM_API_ID = int(os.getenv("TELEGRAM_API_ID", "12345678"))
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "abcdef1234567890abcdef1234567890")
 
 # ----------------------------
-# UPI Deposit (manual, UTR-verified by admin)
+# BharatPe UPI Deposit (real transaction verification via BharatPe API)
 # ----------------------------
-PAYTM_UPI_ID = os.getenv("PAYTM_UPI_ID", "paytm.s1i5v3t@pty")
+BHARATPE_UPI_ID = os.getenv("BHARATPE_UPI_ID", "BHARATPE.8X0M0S6J8F70781@fbpe")
+BHARATPE_TOKEN = os.getenv("BHARATPE_TOKEN", "")
+BHARATPE_MERCHANT_ID = os.getenv("BHARATPE_MERCHANT_ID", "")
 
