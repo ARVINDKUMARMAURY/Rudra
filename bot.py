@@ -929,12 +929,15 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             STATE.pop(uid, None)
             await update.message.reply_text("Cancelled.", reply_markup=reply_menu(is_admin(uid)))
             return
-        utr = text_in.strip()
-        if len(utr) < 4:
-            await update.message.reply_text("Please send a valid UTR / transaction reference number, or press Cancel.")
+        utr = text_in.strip().upper()
+        if not (utr.isalnum() and 8 <= len(utr) <= 22):
+            await update.message.reply_text(
+                "❌ That doesn't look like a valid UTR / transaction reference number "
+                "(should be 8–22 letters/digits, usually 12 digits). Please check your payment app and send the correct UTR, or press Cancel."
+            )
             return
 
-        dup = await repo.db.deposits.find_one({"amount_text": utr, "method": "upi", "status": "approved"})
+        dup = await repo.db.deposits.find_one({"amount_text": utr, "method": "upi", "status": {"$in": ["approved", "pending"]}})
         if dup:
             await update.message.reply_text(
                 "❌ This UTR has already been used for a deposit. Please contact support if this is a mistake.",
