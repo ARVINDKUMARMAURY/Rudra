@@ -41,10 +41,7 @@ TELEGRAM_API_ID = int(os.getenv("TELEGRAM_API_ID", "12345678"))
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "abcdef1234567890abcdef1234567890")
 
 # ----------------------------
-# Paytm Auto‑Verification API (third‑party)
+# UPI Deposit (manual, UTR-verified by admin)
 # ----------------------------
-PAYTM_API_URL = os.getenv("PAYTM_API_URL", "https://tusharbairagi.online")
-PAYTM_API_KEY = os.getenv("PAYTM_API_KEY", "beaf7f50cb4c316b")
-PAYTM_MID = os.getenv("PAYTM_MID", "FBbU131")
 PAYTM_UPI_ID = os.getenv("PAYTM_UPI_ID", "paytm.s1i5v3t@pty")
 

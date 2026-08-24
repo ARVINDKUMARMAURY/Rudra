@@ -6,6 +6,7 @@ import os
 import sys
 import html
 import requests
+from urllib.parse import quote
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
@@ -66,9 +67,6 @@ from config import (
     REPORT_CHANNEL_USERNAME,
     START_IMAGE,
     SUPPORT_USERNAME,
-    PAYTM_API_URL,
-    PAYTM_API_KEY,
-    PAYTM_MID,
     PAYTM_UPI_ID,
 )
 
@@ -899,7 +897,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text_in = (update.message.text or "").strip()
     repo: Repo = context.application.bot_data["repo"]
 
-    if uid in STATE and STATE[uid].get("flow") == "deposit" and STATE[uid].get("step") == "inr_amount_text":
+    if uid in STATE and STATE[uid].get("flow") == "deposit" and STATE[uid].get("step") == "upi_amount_text":
         if text_in.lower() == "cancel":
             STATE.pop(uid, None)
             await update.message.reply_text("Cancelled.", reply_markup=reply_menu(is_admin(uid)))
@@ -908,57 +906,71 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text("Please send a valid amount as a number (e.g. 100), or press Cancel.")
             return
         amount = int(text_in)
-        st = STATE[uid]
-        st["amount"] = amount
-        st["step"] = "paytm_qr"
+        STATE[uid] = {"flow": "deposit", "step": "upi_utr_text", "method": "upi", "amount": amount}
 
+        upi_link = f"upi://pay?pa={PAYTM_UPI_ID}&pn=Payment&am={amount}&cu=INR"
+        qr_img_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={quote(upi_link)}"
+        caption = (
+            f"💳 Pay ₹{amount}\n\n"
+            f"UPI ID: `{PAYTM_UPI_ID}`\n\n"
+            "Scan the QR or pay to the UPI ID above using any UPI app.\n\n"
+            "After paying, send the *UTR / Transaction Reference Number* here as a message "
+            "(you'll find it in your payment app's transaction history)."
+        )
+        markup = kb([[InlineKeyboardButton("❌ Cancel", callback_data="dep:cancel")]])
         try:
-            url = f"{PAYTM_API_URL}/paytm/qr.php"
-            resp = requests.get(url, params={"key": PAYTM_API_KEY, "upi": PAYTM_UPI_ID, "amount": str(amount)}, timeout=10)
-            data_json = resp.json()
-            logging.info(f"[PAYTM QR] uid={uid} amount={amount} response={data_json}")
+            await update.message.reply_photo(photo=qr_img_url, caption=caption, parse_mode=ParseMode.MARKDOWN, reply_markup=markup)
         except Exception:
-            await update.message.reply_text(
-                "❌ Payment gateway error. Please try again later.",
-                reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data="dep:start")]]),
-            )
-            return
+            await update.message.reply_text(caption, parse_mode=ParseMode.MARKDOWN, reply_markup=markup)
+        return
 
-        if not data_json.get("status"):
-            await update.message.reply_text(
-                f"❌ QR generation failed: {data_json.get('msg', data_json.get('message', 'unknown error'))}",
-                reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data="dep:start")]]),
-            )
+    if uid in STATE and STATE[uid].get("flow") == "deposit" and STATE[uid].get("step") == "upi_utr_text":
+        if text_in.lower() == "cancel":
+            STATE.pop(uid, None)
+            await update.message.reply_text("Cancelled.", reply_markup=reply_menu(is_admin(uid)))
             return
-
-        order_id = data_json.get("order_id")
-        qr_url = data_json.get("qr_url")
-        st["order_id"] = order_id
+        utr = text_in.strip()
+        if len(utr) < 4:
+            await update.message.reply_text("Please send a valid UTR / transaction reference number, or press Cancel.")
+            return
+        st = STATE[uid]
+        amount = int(st["amount"])
+        username = update.effective_user.username or ""
 
         deposit_id = await repo.create_deposit_request(
             user_id=uid,
-            username=(update.effective_user.username or ""),
+            username=username,
             amount=amount,
-            method="paytm",
+            method="upi",
             network=None,
-            amount_text=str(amount),
+            amount_text=utr,
         )
-        await repo.db.deposits.update_one(
-            {"_id": ObjectId(deposit_id)},
-            {"$set": {"order_id": order_id}}
-        )
-        st["deposit_id"] = deposit_id
+        STATE.pop(uid, None)
 
-        markup = kb([
-            [InlineKeyboardButton("✅ Paid — Check Payment", callback_data=f"paytm:check:{order_id}")],
-            [InlineKeyboardButton("❌ Cancel", callback_data="dep:cancel")]
+        await update.message.reply_text(
+            f"✅ Submitted!\n\nAmount: ₹{amount}\nUTR: {utr}\n\n"
+            "Your deposit is pending admin approval. You'll be notified once it's confirmed.",
+            reply_markup=reply_menu(is_admin(uid)),
+        )
+
+        admin_markup = kb([
+            [
+                InlineKeyboardButton("✅ Approve", callback_data=f"admin:dep:approve:{deposit_id}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"admin:dep:reject:{deposit_id}"),
+            ],
         ])
-        caption = f"💳 Pay ₹{amount} using Paytm\n\nScan the QR code and pay.\nThen tap the button below to verify.\n\nOrder ID: {order_id}"
-        try:
-            await update.message.reply_photo(photo=qr_url, caption=caption, reply_markup=markup)
-        except Exception:
-            await update.message.reply_text(caption, reply_markup=markup)
-            await update.message.reply_text("❌ Could not display QR image. Please contact support if needed.")
+        admin_text = (
+            "💳 New UPI Deposit — Pending\n\n"
+            f"User: {uid} @{username if username else 'N/A'}\n"
+            f"Amount: ₹{amount}\n"
+            f"UTR: {utr}\n"
+            f"Deposit ID: {deposit_id}"
+        )
+        for admin_id in ADMIN_USER_IDS:
+            try:
+                await context.bot.send_message(chat_id=admin_id, text=admin_text, reply_markup=admin_markup)
+            except Exception:
+                logging.exception(f"Failed to notify admin {admin_id} of new deposit {deposit_id}")
         return
 
     if uid in STATE and STATE[uid].get("flow") == "find_credits" and STATE[uid].get("step") == "input":
@@ -999,7 +1011,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=kb(
                 [
-                    [InlineKeyboardButton("💳 Paytm (Auto Verify)", callback_data="dep:inr")],
+                    [InlineKeyboardButton("💳 Paytm (UPI)", callback_data="dep:upi")],
                     [InlineKeyboardButton("🏠 Menu", callback_data="menu:home")],
                 ]
             ),
@@ -1086,78 +1098,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # ============ PAYTM AUTO-VERIFY ============
     if data.startswith("paytm:check:"):
-        await safe_query_answer(query)
-        order_id = data.split(":", 2)[2]
-        retry_kb = kb([
-            [InlineKeyboardButton("🔄 Check Again", callback_data=f"paytm:check:{order_id}")],
-            [InlineKeyboardButton("❌ Cancel", callback_data="dep:cancel")],
-        ])
-
-        try:
-            url = f"{PAYTM_API_URL}/paytm/pay.php"
-            resp = requests.get(url, params={"key": PAYTM_API_KEY, "mid": PAYTM_MID, "midkey": PAYTM_MID, "oid": order_id}, timeout=10)
-            result = resp.json()
-            logging.info(f"[PAYTM VERIFY] uid={uid} order_id={order_id} response={result}")
-        except Exception:
-            await safe_edit(query.message, "❌ Gateway error. Please try again.", reply_markup=retry_kb, parse_mode=None)
-            return
-
-        status_val = result.get("status")
-        if status_val not in (True, "success", "Success", "SUCCESS", 1):
-            await safe_edit(query.message, "❌ Not paid yet.\n\nPlease complete the payment, then tap Check Again.", reply_markup=retry_kb, parse_mode=None)
-            return
-
-        amount = int(result.get("amount", 0))
-        if amount <= 0:
-            await safe_edit(query.message, "❌ Invalid amount returned. Please contact support.", reply_markup=retry_kb, parse_mode=None)
-            return
-
-        dep = await repo.db.deposits.find_one({"order_id": order_id, "status": "pending"})
-        if not dep:
-            await safe_edit(query.message, "❌ Deposit not found or already processed.", reply_markup=kb([[InlineKeyboardButton("🏠 Menu", callback_data="menu:home")]]), parse_mode=None)
-            return
-
-        deposit_id = str(dep["_id"])
-        user_id = int(dep["user_id"])
-
-        dep2 = await repo.mark_deposit(deposit_id, "approved", admin_id=uid, credits_added=amount)
-        if not dep2:
-            await safe_edit(query.message, "❌ Deposit already processed.", reply_markup=kb([[InlineKeyboardButton("🏠 Menu", callback_data="menu:home")]]), parse_mode=None)
-            return
-
-        await repo.add_credits(user_id, amount, by_admin=uid)
-
-        try:
-            await _notify_referral_award(
-                context=context,
-                repo=repo,
-                referred_user_id=user_id,
-                deposit_amount=amount,
-                admin_id=uid,
-                deposit_id=deposit_id,
-            )
-        except Exception:
-            pass
-
-        try:
-            udoc = await repo.db.users.find_one({"user_id": user_id})
-            bal = int((udoc or {}).get("credits", 0))
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=(
-                    "✅ Payment verified!\n"
-                    f"• Amount: ₹{amount}\n"
-                    f"• Credits added: {amount}\n"
-                    f"• New balance: {bal} credits"
-                ),
-            )
-        except Exception:
-            pass
-
+        # Legacy auto-verify callback (old messages). Auto-verify API removed; direct user to new flow.
+        await safe_query_answer(query, cache_time=0)
         await safe_edit(
             query.message,
-            f"✅ Payment of ₹{amount} confirmed!\nCredits have been added.",
-            reply_markup=kb([[InlineKeyboardButton("🏠 Menu", callback_data="menu:home")]]),
+            "This payment method has been replaced. Please start a new deposit.",
+            reply_markup=kb([[InlineKeyboardButton("💳 New Deposit", callback_data="dep:start")]]),
             parse_mode=None,
         )
         return
@@ -1262,7 +1208,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "💳 *Deposit*\n\nChoose deposit method:",
             reply_markup=kb(
                 [
-                    [InlineKeyboardButton("💳 Paytm (Auto Verify)", callback_data="dep:inr")],
+                    [InlineKeyboardButton("💳 Paytm (UPI)", callback_data="dep:upi")],
                     [InlineKeyboardButton("🏠 Menu", callback_data="menu:home")],
                 ]
             ),
@@ -1299,12 +1245,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
         return
 
-    if data == "dep:inr":
+    if data == "dep:upi":
         await safe_query_answer(query, cache_time=0)
-        STATE[uid] = {"flow": "deposit", "step": "inr_amount_text", "method": "paytm"}
+        STATE[uid] = {"flow": "deposit", "step": "upi_amount_text", "method": "upi"}
         await safe_edit(
             query.message,
-            "💳 Paytm Deposit\n\nType the amount (₹) you want to deposit and send it as a message.\n\nExample: 100",
+            "💳 Paytm/UPI Deposit\n\nType the amount (₹) you want to deposit and send it as a message.\n\nExample: 100",
             reply_markup=kb([[InlineKeyboardButton("❌ Cancel", callback_data="dep:cancel")]]),
             parse_mode=None,
         )
