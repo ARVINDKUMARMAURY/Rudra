@@ -998,10 +998,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text("Please send a valid quantity as a number (e.g. 10), or press Cancel.")
             return
         qty = int(text_in)
-        session_price = await repo.get_session_price()
-        if session_price <= 0:
+        st = STATE[uid]
+        country = st.get("country")
+        session_price = int(st.get("price", 0))
+        if not country or session_price <= 0:
             STATE.pop(uid, None)
-            await update.message.reply_text("Session buying isn't set up yet. Please contact support.", reply_markup=reply_menu(is_admin(uid)))
+            await update.message.reply_text("Something went wrong. Please start again from Buy Session.", reply_markup=reply_menu(is_admin(uid)))
             return
 
         total_cost = qty * session_price
@@ -1016,14 +1018,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         STATE.pop(uid, None)
         accounts, status = await repo.buy_session_accounts(
-            user_id=uid, username=update.effective_user.username, quantity=qty, unit_price=session_price
+            user_id=uid, username=update.effective_user.username, country=country, quantity=qty, unit_price=session_price
         )
         if status == "insufficient_credits":
             await update.message.reply_text("❌ Insufficient balance.", reply_markup=reply_menu(is_admin(uid)))
             return
         if status == "not_available" or not accounts:
             await update.message.reply_text(
-                f"❌ Not enough sessions in stock right now (requested {qty}). Please try a smaller quantity.",
+                f"❌ Not enough {country} sessions in stock right now (requested {qty}). Please try a smaller quantity.",
                 reply_markup=reply_menu(is_admin(uid)),
             )
             return
@@ -1035,12 +1037,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 session_str = acc.get("session_string") or ""
                 zf.writestr(f"{phone}.session", session_str)
         buf.seek(0)
-        buf.name = f"sessions_{qty}.zip"
+        buf.name = f"sessions_{country}_{qty}.zip"
 
         await update.message.reply_document(
             document=buf,
-            filename=f"sessions_{qty}.zip",
-            caption=f"✅ {len(accounts)} session(s) purchased for ₹{total_cost}.",
+            filename=f"sessions_{country}_{qty}.zip",
+            caption=f"✅ {len(accounts)} {country} session(s) purchased for ₹{total_cost}.",
             reply_markup=reply_menu(is_admin(uid)),
         )
         return
@@ -1402,20 +1404,56 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # ---------- Buy Session (raw session files, no live OTP relay) ----------
     if data == "session:start":
         await safe_query_answer(query, cache_time=0)
-        session_price = await repo.get_session_price()
-        available = await repo.count_available_accounts()
-        if session_price <= 0:
+        countries = await repo.list_available_countries()
+        prices = await repo.get_session_prices()
+        priced_countries = [c for c in countries if int(prices.get(c.get("country"), 0)) > 0]
+        if not priced_countries:
             await safe_edit(
                 query.message,
-                "🗂 Buy Session\n\nThis feature isn't set up yet. Please contact support.",
+                "🗂 Buy Session\n\nNo countries are priced for session sale yet. Please contact support.",
                 reply_markup=back_to_menu(),
                 parse_mode=None,
             )
             return
-        STATE[uid] = {"flow": "buy_session", "step": "qty_text"}
+        rows: list[list[InlineKeyboardButton]] = []
+        current: list[InlineKeyboardButton] = []
+        for c in priced_countries:
+            code = c.get("country") or "?"
+            emoji = c.get("country_emoji") or ""
+            count = c.get("count", 0)
+            price = int(prices.get(code, 0))
+            current.append(InlineKeyboardButton(f"{emoji} {code} ₹{price} ({count})", callback_data=f"session:country:{code}"))
+            if len(current) == 2:
+                rows.append(current)
+                current = []
+        if current:
+            rows.append(current)
+        rows.append([InlineKeyboardButton("⬅️ Back", callback_data="menu:home")])
         await safe_edit(
             query.message,
-            f"🗂 Buy Session\n\nPrice: ₹{session_price} per session\nAvailable stock: {available}\n\n"
+            "🗂 Buy Session\n\nChoose a country (price shown per session):",
+            reply_markup=kb(rows),
+            parse_mode=None,
+        )
+        return
+
+    if data.startswith("session:country:"):
+        await safe_query_answer(query, cache_time=0)
+        country = data.split(":", 2)[2]
+        price = await repo.get_session_price_for_country(country)
+        available = await repo.count_available_accounts()  # overall stock display; per-country count already shown at selection
+        if price <= 0:
+            await safe_edit(
+                query.message,
+                "❌ This country isn't priced for session sale anymore. Please go back and pick another.",
+                reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data="session:start")]]),
+                parse_mode=None,
+            )
+            return
+        STATE[uid] = {"flow": "buy_session", "step": "qty_text", "country": country, "price": price}
+        await safe_edit(
+            query.message,
+            f"🗂 Buy Session — {country}\n\nPrice: ₹{price} per session\n\n"
             "Type how many sessions you want to buy (e.g. 10).",
             reply_markup=kb([[InlineKeyboardButton("❌ Cancel", callback_data="dep:cancel")]]),
             parse_mode=None,

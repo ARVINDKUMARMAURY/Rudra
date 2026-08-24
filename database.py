@@ -79,26 +79,31 @@ class Repo:
         )
         return await self.get_bulk_discount()
 
-    # -------- Admin Settings (Session Price) --------
-    async def get_session_price(self) -> int:
-        doc = await self.db.admin_settings.find_one({"key": "session_price"})
+    # -------- Admin Settings (Session Price, per-country) --------
+    async def get_session_prices(self) -> dict[str, int]:
+        doc = await self.db.admin_settings.find_one({"key": "session_prices"})
         if not doc:
-            return 0
-        return int(doc.get("price", 0) or 0)
+            return {}
+        prices = doc.get("prices") or {}
+        return {k: int(v) for k, v in prices.items()}
 
-    async def set_session_price(self, price: int) -> int:
+    async def get_session_price_for_country(self, country: str) -> int:
+        prices = await self.get_session_prices()
+        return int(prices.get(country, 0))
+
+    async def set_session_price_for_country(self, country: str, price: int) -> int:
         price_i = max(0, int(price))
         await self.db.admin_settings.update_one(
-            {"key": "session_price"},
-            {"$set": {"key": "session_price", "price": price_i, "updated_at": utcnow()}},
+            {"key": "session_prices"},
+            {"$set": {"key": "session_prices", f"prices.{country}": price_i, "updated_at": utcnow()}},
             upsert=True,
         )
         return price_i
 
     async def buy_session_accounts(
-        self, *, user_id: int, username: str | None, quantity: int, unit_price: int
+        self, *, user_id: int, username: str | None, country: str, quantity: int, unit_price: int
     ) -> tuple[list[dict[str, Any]], str]:
-        """Atomically buy `quantity` available accounts (any country/year) as raw sessions.
+        """Atomically buy `quantity` available accounts for a specific country as raw sessions.
         Deducts credits first, then assigns accounts one by one; rolls back fully on any failure."""
         now = utcnow()
         await self.ensure_user(user_id)
@@ -115,7 +120,7 @@ class Repo:
         assigned: list[dict[str, Any]] = []
         for _ in range(quantity):
             account = await self.db.accounts.find_one_and_update(
-                {"status": "available"},
+                {"status": "available", "country": country},
                 {
                     "$set": {
                         "status": "assigned",

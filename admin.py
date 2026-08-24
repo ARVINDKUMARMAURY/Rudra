@@ -665,28 +665,48 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
     if data == "admin:sessionprice":
         await query.answer(cache_time=0)
         await restore_main_reply_menu(query.message)
-        current = await repo.get_session_price()
-        available = await repo.count_available_accounts()
+        countries = await repo.list_available_countries()
+        prices = await repo.get_session_prices()
+        if not countries:
+            await safe_edit(
+                query.message,
+                "🗂 Session Price\n\nNo countries with available stock right now. Add accounts first.",
+                parse_mode=None,
+                reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data="admin:menu")]]),
+            )
+            return True
+        rows: list[list[InlineKeyboardButton]] = []
+        current: list[InlineKeyboardButton] = []
+        for c in countries:
+            code = c.get("country") or "?"
+            emoji = c.get("country_emoji") or ""
+            count = c.get("count", 0)
+            price = int(prices.get(code, 0))
+            label = f"{emoji} {code} — ₹{price} ({count} in stock)"
+            current.append(InlineKeyboardButton(label, callback_data=f"admin:sessionprice:set:{code}"))
+            if len(current) == 1:
+                rows.append(current)
+                current = []
+        if current:
+            rows.append(current)
+        rows.append([InlineKeyboardButton("⬅️ Back", callback_data="admin:menu")])
         await safe_edit(
             query.message,
-            f"🗂 Session Price\n\nCurrent price: ₹{current} per session\nAvailable stock: {available}\n\n"
-            "This is the price users pay per session in the 'Buy Session' (bulk ZIP) feature.",
+            "🗂 Session Price (per country)\n\nTap a country to set its per-session price for the 'Buy Session' feature.\n₹0 = not for sale.",
             parse_mode=None,
-            reply_markup=kb(
-                [
-                    [InlineKeyboardButton("✏️ Set Price", callback_data="admin:sessionprice:set")],
-                    [InlineKeyboardButton("⬅️ Back", callback_data="admin:menu")],
-                ]
-            ),
+            reply_markup=kb(rows),
         )
         return True
 
-    if data == "admin:sessionprice:set":
+    if data.startswith("admin:sessionprice:set:"):
         await query.answer(cache_time=0)
         await restore_main_reply_menu(query.message)
-        state[uid] = {"flow": "admin_sessionprice", "step": "price"}
+        country = data.split(":", 3)[3]
+        current_price = await repo.get_session_price_for_country(country)
+        state[uid] = {"flow": "admin_sessionprice", "step": "price", "country": country}
         await query.message.reply_text(
-            "🗂 Session Price\n\nSend the price (in credits/₹) to charge per session.\nExample: 20\n\nType Cancel to stop.",
+            f"🗂 Session Price — {country}\n\nCurrent: ₹{current_price}\n\n"
+            "Send the new price (in credits/₹) to charge per session for this country.\nExample: 20\n\nType Cancel to stop.",
             reply_markup=cancel_reply_kb(),
         )
         return True
@@ -1248,10 +1268,15 @@ async def handle_admin_text(
                 await update.message.reply_text("Send a valid positive number (example 20):")
                 return True
             new_price = int(text)
-            await repo.set_session_price(new_price)
+            country = st.get("country")
+            if not country:
+                state.pop(uid, None)
+                await update.message.reply_text("Something went wrong. Please try again from the Session Price menu.", reply_markup=main_reply_menu(True))
+                return True
+            await repo.set_session_price_for_country(country, new_price)
             state.pop(uid, None)
             await update.message.reply_text(
-                f"✅ Session price updated!\n\nNew price: ₹{new_price} per session",
+                f"✅ Session price updated!\n\n{country}: ₹{new_price} per session",
                 reply_markup=main_reply_menu(True),
             )
             return True
