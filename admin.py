@@ -703,9 +703,10 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await restore_main_reply_menu(query.message)
         country = data.split(":", 3)[3]
         current_price = await repo.get_session_price_for_country(country)
+        stock_count = await repo.db.accounts.count_documents({"status": "available", "country": country})
         state[uid] = {"flow": "admin_sessionprice", "step": "price", "country": country}
         await query.message.reply_text(
-            f"🗂 Session Price — {country}\n\nCurrent: ₹{current_price}\n\n"
+            f"🗂 Session Price — {country}\n\nAvailable stock: {stock_count} session(s)\nCurrent price: ₹{current_price}\n\n"
             "Send the new price (in credits/₹) to charge per session for this country.\nExample: 20\n\nType Cancel to stop.",
             reply_markup=cancel_reply_kb(),
         )
@@ -1274,9 +1275,10 @@ async def handle_admin_text(
                 await update.message.reply_text("Something went wrong. Please try again from the Session Price menu.", reply_markup=main_reply_menu(True))
                 return True
             await repo.set_session_price_for_country(country, new_price)
+            stock_count = await repo.db.accounts.count_documents({"status": "available", "country": country})
             state.pop(uid, None)
             await update.message.reply_text(
-                f"✅ Session price updated!\n\n{country}: ₹{new_price} per session",
+                f"✅ Session price updated!\n\n{country}: ₹{new_price} per session\nStock: {stock_count} session(s) available",
                 reply_markup=main_reply_menu(True),
             )
             return True
